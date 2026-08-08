@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 日志与运行时产物(不入库)
+logs/*.log
+logs/*.png
+logs/*.json
+logs/screenshot_*
+!logs/.gitkeep
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# 校准产出的正式模板较大,选择性入库
+# _ref 参考模板入库,正式模板由用户在本地校准生成
+images/**/*.tmp

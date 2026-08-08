@@ -1,0 +1,139 @@
+# ============================================================
+# NBA2K Online2 多账号连续托管自动化 - 主配置文件
+# ============================================================
+# 坐标说明:
+#   本程序采用【图像模板匹配】为主,坐标区域(roi)仅用于缩小搜索范围、
+#   提升速度与准确率。所有 roi 坐标基于【游戏窗口客户区左上角(0,0)】,
+#   而非整个屏幕,这样窗口移动也不影响。ROI 为 [x0, y0, x1, y1]。
+#   如留空 [] 则在全窗口搜索。
+#   首次使用请运行 tools/calibrate.py 自动标定并覆盖这些值。
+# ============================================================
+
+# --- 显示环境 ---
+display:
+  physical_resolution: [3840, 2160]      # 物理屏幕分辨率
+  scaling_percent: 250                    # Windows 显示缩放比例 (%)
+  # 逻辑分辨率 = 3840/2.5 = 1536x864 (系统坐标用这个)
+  logical_resolution: [1536, 864]
+
+# --- 游戏窗口 ---
+game_window:
+  # 游戏窗口标题(用于 win32 查找),支持模糊匹配
+  title_keywords: ["NBA2K", "2K", "NBA 2K"]
+  # 启动模式: windowed(窗口) / borderless(无边框) / fullscreen(全屏)
+  # 强烈建议 windowed 或 borderless,程序会把窗口移到 (0,0) 并固定
+  preferred_mode: windowed
+  # 期望的窗口客户区尺寸(像素)。1920x1080 是游戏窗口模式默认且最稳。
+  target_client_size: [1920, 1080]
+  # 启动后是否强制移动窗口到左上角并置顶
+  force_position: true
+
+# --- WeGame 窗口 ---
+wegame_window:
+  title_keywords: ["WeGame", "wegame"]
+  # 启动按钮所在的大致区域(全屏物理坐标,用于加速匹配)
+  start_button_roi: []
+  # 账号切换入口(右上角头像)区域
+  avatar_roi: []
+  # 切换账号菜单项区域
+  switch_account_item_roi: []
+
+# --- 账号列表 ---
+# 账号按固定顺序轮转,不按名字匹配。
+# 列表一屏显示 4 个,需向下滑动才能看到第 5、6 个。
+account_list:
+  # 每个账号条目的高度(像素,在 WeGame 窗口客户区内)
+  # 校准工具会自动测量。这里给一个基于截图的初始估计。
+  item_height: 80
+  # 列表第一个可见项的中心 Y 坐标(客户区内)
+  first_item_y: 0
+  # 列表区域的 ROI(用于滚动定位)
+  list_roi: []
+  # 切换到第 5/6 个账号需要的滚动次数(每次滚动 3 格)
+  scroll_steps_for_tail: 3
+
+# --- 游戏内导航 ROI(基于游戏窗口客户区 1920x1080) ---
+# 全部留空表示全窗口搜索,校准后填充可加速。
+game_roi:
+  announcement_close: []        # 公告弹窗的关闭×按钮
+  start_match_button: []        # "开始比赛" 按钮
+  ranked_tab: []                # "排位赛 S32" 页签
+  manager_entry: []             # 排位经理入口
+  continuous_trustee_option: [] # "连续托管" 选项
+  enter_button: []              # "进入" 按钮
+  matching_indicator: []        # 匹配中/比赛中标识
+
+# --- 托管状态读取(ESC 菜单) ---
+trusteeship_status:
+  # ESC 菜单顶部"托管模式开关"附近的剩余次数显示区域
+  remaining_count_roi: []
+  # "关 / OFF" 按钮区域(点击后停止新匹配)
+  off_button_roi: []
+  # 显示格式: "remaining/max" 或 "current/max"
+  #   - remaining/max: 显示"剩余/上限",程序直接读第一个数字作为剩余
+  #   - current/max:   显示"已用/上限",程序计算 remaining = max - current
+  # 截图显示 "连续托管(15/20)",含义需在校准时确认。默认按"剩余"解读。
+  display_format: "remaining/max"
+  max_games: 20
+  # 剩余次数 <= 此阈值时收号
+  stop_threshold: 14
+  # 排位赛界面的连续托管显示(匹配前也能看到,格式 连续托管(X/Y))
+  ranked_display_roi: []
+
+# --- 计时与轮询 ---
+timing:
+  # 从"进入连续托管并开始匹配"起算的托管时长(秒)
+  trusteeship_duration: 7200     # 2 小时
+  # 剩余 > 阈值时,复查间隔(秒)
+  recheck_interval: 600          # 10 分钟
+  # 点击后等待 UI 响应的通用超时(秒)
+  ui_timeout: 15
+  # 游戏启动最大等待时长(秒)
+  game_launch_timeout: 120
+  # 单场比赛估算时长(秒),用于"等比赛结束"轮询
+  match_estimate: 900            # 15 分钟
+  # 等比赛结束轮询间隔(秒)
+  match_end_poll_interval: 30
+  # 等比赛结束最大时长(秒),超时强制关游戏
+  match_end_max_wait: 1800       # 30 分钟
+
+# --- 关游戏 ---
+shutdown:
+  method: alt_f4                 # alt_f4 / taskkill / window_close
+  # Alt+F4 后会弹出"是否退出"确认框,需要点"是"
+  confirm_dialog: true
+  confirm_yes_roi: []
+
+# --- 图像匹配参数 ---
+vision:
+  # 模板匹配置信度阈值(0~1)
+  confidence_threshold: 0.82
+  # 是否在灰度图上匹配(更快,颜色干扰少)
+  grayscale: true
+  # 多尺度搜索(应对缩放不一致),开启更稳但更慢
+  multi_scale: true
+  # 缩放搜索范围
+  scale_range: [0.5, 2.0]
+  scale_steps: 10
+
+# --- 运行模式 ---
+runtime:
+  # dry_run: 只识别不点击,高亮显示匹配框(调试用)
+  # step_pause: 每步暂停等待回车(单步调试)
+  # normal: 正常运行
+  mode: normal
+  # 每步之间固定等待(秒),给 UI 缓冲
+  step_delay: 1.0
+  # 防息屏:挂机期间阻止系统休眠
+  prevent_sleep: true
+  # 状态持久化文件(记录当前轮转到第几个账号,中断后可续跑)
+  state_file: "logs/state.json"
+  # 出错时自动截图保存到 logs/
+  screenshot_on_error: true
+
+# --- 日志 ---
+logging:
+  level: INFO                     # DEBUG / INFO / WARNING / ERROR
+  file: "logs/run.log"
+  # 是否在控制台输出彩色日志
+  console_color: true
