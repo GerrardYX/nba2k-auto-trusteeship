@@ -65,7 +65,7 @@ CONFIG_PATH = os.path.join(PROJ_ROOT, "config", "settings.yaml")
 
 def grab_full():
     """截取全屏"""
-    with mss.mss() as sct:
+    with mss.MSS() as sct:
         shot = sct.grab(sct.monitors[1])
         return np.array(shot)[:, :, :3]
 

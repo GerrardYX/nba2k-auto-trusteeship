@@ -89,7 +89,7 @@ def grab_screen(region=None):
     返回 numpy BGR 图像。
     """
     if _MSS:
-        with mss.mss() as sct:
+        with mss.MSS() as sct:
             if region:
                 monitor = {"left": region[0], "top": region[1],
                            "width": region[2], "height": region[3]}
