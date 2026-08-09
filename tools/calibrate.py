@@ -82,18 +82,37 @@ def save_template(img, category, name):
     return path
 
 
-def interactive_crop(img, title="框选区域(拖拽选择,按回车确认)"):
+def interactive_crop(img, title="框选区域"):
     """
-    交互式框选区域。用 OpenCV 窗口拖拽选择矩形。
-    返回裁剪后的图像或 None。
+    交互式框选区域。4K 图自动缩小到 1920 宽显示(否则超出屏幕看不到),
+    框选后从【原图】按比例裁剪,保持高清模板。
+    操作:鼠标左键拖拽画矩形 → 按空格/回车确认 → 按 c 重选。
+    返回裁剪后的原图区域或 None。
     """
-    roi = cv2.selectROI(title, img, showCrosshair=True, fromCenter=False)
+    h, w = img.shape[:2]
+    # 4K 等大图缩小到适合屏幕显示的尺寸
+    max_w = 1920
+    scale = 1.0
+    disp = img
+    if w > max_w:
+        scale = max_w / w
+        disp_w, disp_h = int(w * scale), int(h * scale)
+        disp = cv2.resize(img, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
+        print(f"  (原图 {w}x{h} 已缩小到 {disp_w}x{disp_h} 显示,框选后自动还原高清)")
+
+    print("  操作:鼠标拖拽画框 → 空格/回车确认 → c 重选")
+    roi = cv2.selectROI(title, disp, showCrosshair=True, fromCenter=False)
     cv2.destroyAllWindows()
     if roi[2] == 0 or roi[3] == 0:
         print("未选择区域")
         return None
-    x, y, w, h = roi
-    return img[y:y+h, x:x+w]
+    # 把缩小图上的坐标还原到原图坐标
+    x = int(roi[0] / scale)
+    y = int(roi[1] / scale)
+    rw = int(roi[2] / scale)
+    rh = int(roi[3] / scale)
+    # 从原图裁剪(高清)
+    return img[y:y+rh, x:x+rw]
 
 
 def interactive_point(img, title="点击选择一个点(任意键确认)"):
@@ -131,8 +150,8 @@ def save_config(cfg):
 # ============================================================
 def cmd_capture(args):
     """截图并裁剪模板"""
-    print(f"3 秒后截屏,请切到目标界面...")
-    for i in range(3, 0, -1):
+    print("5 秒后截屏,请按 Alt+Tab 切到目标界面...")
+    for i in range(5, 0, -1):
         print(f"  {i}...")
         time.sleep(1)
     img = grab_full()
@@ -301,7 +320,11 @@ def cmd_autorun(args):
     print("  引导式校准 - 一步步采集所有模板")
     print("=" * 60)
     print("说明:")
-    print("  每一步会:1)提示你准备画面 2)3秒后截屏 3)你框选区域")
+    print("  每一步会:1)提示你准备画面 2)5秒后截屏 3)你框选区域")
+    print("  ⚠ 截屏会截到整个屏幕,倒计时时务必用 Alt+Tab 切到目标窗口!")
+    print("    (终端窗口会被截进图里,所以要切到 WeGame/游戏 让目标可见)")
+    print("  框选窗口里:鼠标拖拽画框 → 空格/回车确认 → c 重选")
+    print("  4K 图会自动缩小显示,裁剪仍保持高清")
     print("  可随时按 Ctrl+C 跳过当前步骤(该模板留空,后续再补)")
     print("  已采集的步骤会跳过(除非加 --force)\n")
 
@@ -335,12 +358,13 @@ def cmd_autorun(args):
             continue
 
         try:
-            print("3 秒后截屏...")
-            for c in range(3, 0, -1):
+            print("\n>>> 现在按 Alt+Tab 切换到目标窗口!5 秒后截屏 <<<")
+            for c in range(5, 0, -1):
                 print(f"  {c}...")
                 time.sleep(1)
             img = grab_full()
-            print(f"请框选【{name}】区域,选好后按回车/空格确认")
+            print(f"截图完成!请在弹出的窗口里框选【{name}】区域")
+            print("  (鼠标拖拽画框 → 空格/回车确认)")
             cropped = interactive_crop(img, f"框选: {name}")
             if cropped is not None:
                 save_template(cropped, cat, fname)
