@@ -287,30 +287,185 @@ def diff_mode(hwnd):
         print("✗ 两张图尺寸不同,无法对比")
 
 
+def grab_fullscreen():
+    """截取全屏"""
+    import mss
+    with mss.MSS() as sct:
+        shot = sct.grab(sct.monitors[1])
+        return np.array(shot)[:, :, :3]
+
+
 def main():
     parser = argparse.ArgumentParser(description="视觉探针工具")
-    parser.add_argument('--window', action='store_true', help='交互式选窗口')
     parser.add_argument('--diff', action='store_true', help='变化检测:操作前后对比')
+    parser.add_argument('--fullscreen', action='store_true', help='直接截全屏(不找窗口)')
     args = parser.parse_args()
 
-    import window_utils
+    # 默认先找 WeGame 窗口,找不到就截全屏
+    use_fullscreen = args.fullscreen
+    hwnd = None
 
-    # 找 WeGame 窗口
-    hwnd = window_utils.find_window(["WeGame"])
+    if not use_fullscreen:
+        try:
+            import window_utils
+            # 尝试多个关键词
+            for kws in [["WeGame"], ["WeGame", "wegame"], ["腾讯"], ["Tencent"]]:
+                hwnd = window_utils.find_window(kws)
+                if hwnd:
+                    print(f"✓ 找到窗口 (关键词={kws[0]}) hwnd={hwnd}")
+                    window_utils.activate_window(hwnd)
+                    time.sleep(1)
+                    break
+        except Exception as e:
+            print(f"⚠ 窗口查找异常: {e}")
+
     if not hwnd:
-        print("✗ 未找到 WeGame 窗口")
-        print("  如果 WeGame 窗口标题不同,请手动指定:")
-        print("  修改 tools/probe.py 里的窗口关键词")
-        return
-
-    print(f"✓ WeGame 窗口: hwnd={hwnd}")
-    window_utils.activate_window(hwnd)
-    time.sleep(1)
+        print("⚠ 未找到 WeGame 窗口,改为截全屏")
+        print("  (确保 WeGame 在屏幕上可见!)")
+        use_fullscreen = True
 
     if args.diff:
-        diff_mode(hwnd)
+        if use_fullscreen:
+            diff_mode_fullscreen()
+        else:
+            diff_mode(hwnd)
     else:
-        probe_once(hwnd, tag="manual")
+        if use_fullscreen:
+            probe_once_fullscreen(tag="manual")
+        else:
+            probe_once(hwnd, tag="manual")
+
+
+def probe_once_fullscreen(tag="probe"):
+    """全屏版探针"""
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    outdir = os.path.join(DEBUG_DIR, f"probe_{tag}_{ts}")
+    os.makedirs(outdir, exist_ok=True)
+
+    print(f"\n{'='*50}")
+    print(f"探针(全屏): {tag}")
+    print(f"输出目录: {outdir}")
+    print(f"{'='*50}")
+
+    print("3秒后截屏...")
+    for i in range(3, 0, -1):
+        print(f"  {i}...")
+        time.sleep(1)
+
+    img = grab_fullscreen()
+    if img is None:
+        print("✗ 截图失败")
+        return
+
+    raw_path = os.path.join(outdir, "raw.png")
+    cv2.imwrite(raw_path, img)
+    print(f"✓ 原图: {raw_path} ({img.shape[1]}x{img.shape[0]})")
+
+    engine = ensure_paddleocr()
+    detections = ocr_screen(img, engine)
+    print(f"\nOCR 检测到 {len(detections)} 个文字块:")
+    for d in sorted(detections, key=lambda x: (x['y'], x['x'])):
+        print(f"  ({d['x']:5d},{d['y']:5d}) conf={d['confidence']:.2f}  {d['text']}")
+
+    numbers = find_numbers(detections)
+    print(f"\n找到 {len(numbers)} 个QQ号:")
+    for n in numbers:
+        print(f"  QQ:{n['text']} 位置=({n['x']},{n['y']})")
+
+    annotated = annotate(img, detections, numbers)
+    ann_path = os.path.join(outdir, "annotated.png")
+    cv2.imwrite(ann_path, annotated)
+    print(f"\n✓ 标注图: {ann_path}")
+
+    data = {'timestamp': ts, 'tag': tag,
+            'image_size': [img.shape[1], img.shape[0]],
+            'detections': detections, 'numbers': numbers}
+    json_path = os.path.join(outdir, "detections.json")
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    print(f"✓ JSON: {json_path}")
+
+    cv2.imshow("Probe (按任意键关闭)", annotated)
+    print("\n弹出窗口显示标注结果,按任意键关闭...")
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+    return outdir
+
+
+def diff_mode_fullscreen():
+    """全屏版变化检测"""
+    print("\n=== 变化检测模式(全屏) ===")
+    print("1. 按回车截'操作前'画面")
+    input("按回车...")
+    img_before = grab_fullscreen()
+    if img_before is None:
+        print("✗ 截图失败")
+        return
+    print(f"✓ 操作前截图 ({img_before.shape[1]}x{img_before.shape[0]})")
+
+    print("\n2. 现在手动操作(比如点下拉箭头)")
+    input("操作完后按回车截'操作后'画面...")
+    img_after = grab_fullscreen()
+    if img_after is None:
+        print("✗ 截图失败")
+        return
+
+    if img_before.shape != img_after.shape:
+        print("✗ 两张图尺寸不同,无法对比")
+        return
+
+    diff = cv2.absdiff(img_before, img_after)
+    gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray_diff, 30, 255, cv2.THRESH_BINARY)
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    changes = []
+    for c in contours:
+        if cv2.contourArea(c) > 200:
+            x, y, w, h = cv2.boundingRect(c)
+            changes.append({'x': x, 'y': y, 'w': w, 'h': h,
+                            'cx': x + w//2, 'cy': y + h//2})
+
+    annotated = img_after.copy()
+    for ch in changes:
+        cv2.rectangle(annotated, (ch['x'], ch['y']),
+                      (ch['x']+ch['w'], ch['y']+ch['h']), (0, 0, 255), 3)
+
+    engine = ensure_paddleocr()
+    det_before = ocr_screen(img_before, engine)
+    det_after = ocr_screen(img_after, engine)
+    texts_before = {d['text'] for d in det_before}
+    texts_after = {d['text'] for d in det_after}
+    new_texts = texts_after - texts_before
+    gone_texts = texts_before - texts_after
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    outdir = os.path.join(DEBUG_DIR, f"diff_{ts}")
+    os.makedirs(outdir, exist_ok=True)
+    cv2.imwrite(os.path.join(outdir, "before.png"), img_before)
+    cv2.imwrite(os.path.join(outdir, "after.png"), img_after)
+    cv2.imwrite(os.path.join(outdir, "diff_annotated.png"), annotated)
+
+    print(f"\n{'='*50}")
+    print(f"变化检测结果 (输出: {outdir})")
+    print(f"{'='*50}")
+    print(f"\n变化区域: {len(changes)} 个")
+    for ch in changes:
+        print(f"  ({ch['cx']},{ch['cy']}) 尺寸={ch['w']}x{ch['h']}")
+    print(f"\n新增文字: {new_texts if new_texts else '无'}")
+    print(f"消失文字: {gone_texts if gone_texts else '无'}")
+    print(f"\n操作后 OCR 全部结果:")
+    for d in sorted(det_after, key=lambda x: (x['y'], x['x'])):
+        tag = " [新增]" if d['text'] in new_texts else ""
+        print(f"  ({d['x']:5d},{d['y']:5d})  {d['text']}{tag}")
+
+    h, w = annotated.shape[:2]
+    if w > 1600:
+        scale = 1600 / w
+        annotated = cv2.resize(annotated, (int(w*scale), int(h*scale)),
+                               interpolation=cv2.INTER_AREA)
+    cv2.imshow("After + Changes (按任意键关闭)", annotated)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
