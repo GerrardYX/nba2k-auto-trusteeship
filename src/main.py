@@ -21,6 +21,21 @@ import argparse
 import os
 import sys
 import time
+import platform
+import ctypes
+
+# ============================================================
+# 必须最先执行:DPI 感知
+# 否则高缩放屏(250%)上截图坐标和点击坐标差缩放倍数,所有点击都会偏
+# ============================================================
+if platform.system() == "Windows":
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 import yaml
 
@@ -54,7 +69,7 @@ def run_account(cfg, wg, account, is_first=False):
     log.info(f"▶ 开始处理 {label} (#{idx})")
     log.info(f"{'='*60}")
 
-    # 1. 确认 WeGame 窗口并选账号
+    # 1. 确认 WeGame 窗口并登录账号
     if not wg.find():
         log.error("WeGame 未运行,请先打开 WeGame")
         return False
@@ -65,16 +80,16 @@ def run_account(cfg, wg, account, is_first=False):
         # 首个账号:判断当前在登录界面还是主界面
         log.info(">>> 步骤1: 首个账号,确认登录状态")
         if wg.is_login_page():
-            log.info("在登录界面,选账号登录")
-            if not wg.select_account_on_login(idx):
+            log.info("在登录界面,键盘直输登录")
+            if not wg.login_with_account(account):
                 log.error(f"登录 {label} 失败")
                 return False
         else:
             log.info("已在主界面(已登录),直接继续")
     else:
-        # 后续账号:从头像切换账号回登录界面
+        # 后续账号:切换账号回登录界面,再键盘直输
         log.info(">>> 步骤1: 切换账号")
-        if not wg.switch_to_account(idx):
+        if not wg.switch_to_account(account):
             log.error(f"切换到 {label} 失败")
             return False
 
