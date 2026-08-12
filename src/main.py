@@ -176,9 +176,8 @@ def main():
     log.info(f"本次将运行 {len(accounts_to_run)} 个账号")
     log.info(rotator.summary())
 
-    # 首个账号标记
-    is_first = (not args.account) and (rotator.get_start_index() == 1
-                                        and not rotator.state.get("completed"))
+    # 首个账号标记(第一个处理的账号,不管是不是 --account 指定的)
+    is_first = True
 
     # 主循环
     for i, account in enumerate(accounts_to_run):
