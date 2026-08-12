@@ -86,23 +86,27 @@ class WeGameController:
         return self._select_from_numbers(numbers, account_index)
 
     def _try_expand_list(self):
-        """尝试展开账号列表(点当前账号或找切换按钮)"""
-        # 方法1:找"切换账号"文字并点击
-        if vision.click_text(self.hwnd, "切换账号", timeout=2):
-            return
-        # 方法2:找当前账号号(QQ号)并点击它(通常点账号会展开列表)
+        """
+        展开账号列表。
+        WeGame登录界面默认只显示1个账号,旁边有下拉箭头。
+        点击QQ号右侧(箭头位置)展开完整列表。
+        """
+        # 找当前账号的QQ号
         numbers = vision.find_all_numbers(self.hwnd, timeout=2)
-        if numbers:
-            n = numbers[0]
-            vision.click(n['x'], n['y'], hwnd=self.hwnd)
-            log.info(f"点击当前账号 {n['text']} 展开列表")
+        if not numbers:
+            log.warning("未找到任何QQ号,无法定位箭头")
             return
-        # 方法3:在第一个数字右侧偏移点击(下拉箭头通常在右侧)
-        if numbers:
-            n = numbers[0]
-            # 偏移量基于数字宽度(不是硬编码坐标,是相对元素的偏移)
-            offset = n.get('x1', n['x']) - n['x'] + 20
-            vision.click_relative_to(n, offset, 0, hwnd=self.hwnd)
+
+        n = numbers[0]
+        # 下拉箭头在QQ号右侧。偏移量基于数字宽度(相对元素,非硬编码坐标)
+        num_width = n.get('x1', n['x']) - n.get('x0', n['x'])
+        if num_width < 10:
+            num_width = 100  # OCR没给宽度时的默认值
+        # 箭头通常在数字右侧 10-30px 处
+        arrow_x = n['x'] + num_width // 2 + 30
+        arrow_y = n['y']
+        log.info(f"点击下拉箭头(在 {n['text']} 右侧) ({arrow_x},{arrow_y})")
+        vision.click(arrow_x, arrow_y, hwnd=self.hwnd)
 
     def _select_from_numbers(self, numbers, account_index):
         """从OCR找到的数字列表中选第N个,需要时滚动"""
