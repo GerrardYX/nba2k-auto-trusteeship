@@ -373,7 +373,118 @@ def hotkey(*keys):
 
 
 # ============================================================
-# OCR 数字识别
+# OCR 文字查找与点击
+# ============================================================
+def find_text(hwnd, text, roi=None, timeout=10, interval=0.8, partial=True):
+    """
+    在窗口客户区用 OCR 查找文字,返回中心坐标或 None。
+    text: 要查找的文字(如"开始比赛"、"连续托管"、"切换账号")
+    roi: [x0,y0,x1,y1] 限定区域;None=全窗口
+    partial: True=文字包含即匹配(如"开始"匹配"开始比赛")
+    timeout: 等待超时(秒),0=只查一次
+    返回 {'x','y','text'} 或 None
+    """
+    if not _TESS or not _CV2:
+        log.error("需要 pytesseract + opencv")
+        return None
+
+    log.info(f"OCR 查找文字 [{text}] 超时={timeout}s")
+    start = time.time()
+    while True:
+        result = grab_window(hwnd)
+        if not result or result[0] is None:
+            if time.time() - start >= timeout:
+                return None
+            time.sleep(interval)
+            continue
+        screen, _ = result
+
+        search_area = screen
+        off_x, off_y = 0, 0
+        if roi:
+            x0, y0, x1, y1 = roi
+            x0, y0 = max(0, x0), max(0, y0)
+            x1 = min(screen.shape[1], x1)
+            y1 = min(screen.shape[0], y1)
+            if x1 <= x0 or y1 <= y0:
+                return None
+            search_area = screen[y0:y1, x0:x1]
+            off_x, off_y = x0, y0
+
+        # 放大2x 提升 OCR 精度
+        sh, sw = search_area.shape[:2]
+        scaled = cv2.resize(search_area, (sw * 2, sh * 2),
+                            interpolation=cv2.INTER_CUBIC)
+        gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
+
+        data = pytesseract.image_to_data(
+            gray, lang='chi_sim+eng', config='--psm 11',
+            output_type=pytesseract.Output.DICT)
+
+        # 收集所有文字块,合并同行
+        blocks = {}
+        for i in range(len(data['text'])):
+            t = data['text'][i].strip()
+            if not t:
+                continue
+            key = (data['block_num'][i], data['line_num'][i])
+            if key not in blocks:
+                blocks[key] = {'texts': [], 'x': data['left'][i],
+                               'y': data['top'][i],
+                               'x1': data['left'][i] + data['width'][i],
+                               'y1': data['top'][i] + data['height'][i]}
+            blocks[key]['texts'].append(t)
+            blocks[key]['x'] = min(blocks[key]['x'], data['left'][i])
+            blocks[key]['y'] = min(blocks[key]['y'], data['top'][i])
+            blocks[key]['x1'] = max(blocks[key]['x1'],
+                                    data['left'][i] + data['width'][i])
+            blocks[key]['y1'] = max(blocks[key]['y1'],
+                                    data['top'][i] + data['height'][i])
+
+        for key, b in blocks.items():
+            full = ''.join(b['texts']).replace(' ', '')
+            if partial:
+                match = text.replace(' ', '') in full or full in text.replace(' ', '')
+            else:
+                match = (full == text.replace(' ', ''))
+            if match:
+                # 中心坐标(还原缩放和偏移)
+                cx = int((b['x'] + b['x1']) / 2 / 2) + off_x
+                cy = int((b['y'] + b['y1']) / 2 / 2) + off_y
+                log.info(f"✓ 找到 [{text}] 于 ({cx},{cy}) 原文={full}")
+                return {'x': cx, 'y': cy, 'text': full}
+
+        if time.time() - start >= timeout:
+            log.warning(f"✗ OCR 未找到 [{text}]")
+            Logger.screenshot(f"ocr_fail_{text}")
+            return None
+        time.sleep(interval)
+
+
+def find_any_text(hwnd, texts, roi=None, timeout=10, interval=0.8, partial=True):
+    """查找多个文字中任一,返回 (匹配文字, result) 或 None"""
+    log.info(f"OCR 查找任一文字 {texts} 超时={timeout}s")
+    start = time.time()
+    while time.time() - start < timeout:
+        for t in texts:
+            r = find_text(hwnd, t, roi=roi, timeout=0, partial=partial)
+            if r:
+                return (t, r)
+        time.sleep(interval)
+    log.warning(f"✗ OCR 未找到 {texts} 任一")
+    return None
+
+
+def click_text(hwnd, text, roi=None, timeout=10, partial=True):
+    """OCR 查找文字并点击其中心。返回 True/False"""
+    r = find_text(hwnd, text, roi=roi, timeout=timeout, partial=partial)
+    if r:
+        return click(r['x'], r['y'], hwnd=hwnd)
+    return False
+
+
+# ============================================================
+# OCR 数字识别(原有功能)
 # ============================================================
 def ocr_region(hwnd, roi, digit_only=False, scale=2, psm=7):
     """
