@@ -113,14 +113,24 @@ class TrusteeshipMonitor:
     def stop_new_matches(self):
         """点击连续托管右侧的"关/OFF"按钮,停止新匹配"""
         log.info("点击'关'按钮停止新匹配")
-        tpl = _tpl("off_button.png")
-        if os.path.exists(tpl):
-            roi = self.ts_cfg.get("off_button_roi", []) or None
-            if vision.click_template(tpl, hwnd=self.hwnd, roi=roi, timeout=8):
-                log.info("已点击关按钮,停止新匹配")
-                time.sleep(1.0)
-                return True
-        log.error("关按钮未匹配")
+        # 优先 OCR 找"关"字
+        r = vision.find_text(self.hwnd, "关", timeout=8, partial=False)
+        if r:
+            vision.click(r['x'], r['y'], hwnd=self.hwnd)
+            log.info("已点击关按钮,停止新匹配")
+            time.sleep(1.0)
+            return True
+        # 备用:找"OFF"
+        if vision.click_text(self.hwnd, "OFF", timeout=3, partial=True):
+            log.info("已点击OFF按钮")
+            time.sleep(1.0)
+            return True
+        # 备用:找"关闭"
+        if vision.click_text(self.hwnd, "关闭", timeout=3, partial=True):
+            log.info("已点击关闭")
+            time.sleep(1.0)
+            return True
+        log.error("关按钮未找到")
         Logger.screenshot("off_button_fail")
         return False
 
@@ -130,48 +140,40 @@ class TrusteeshipMonitor:
     def wait_match_end(self):
         """
         等待当前这场比赛打完。
-        双保险判定:
-          ① 结算页(胜利/失败 模板匹配)出现
-          ② 或回到主菜单/大厅界面出现
+        双保险判定(OCR):
+          ① 结算页标志文字出现("当家球星"、"胜利"、"失败"、"结算")
+          ② 或回到主菜单("开始比赛"、"我的球队")出现
         """
         max_wait = self.timing.get("match_end_max_wait", 1800)
         poll = self.timing.get("match_end_poll_interval", 30)
         log.info(f"等待当前比赛结束 超时={max_wait}s 轮询={poll}s")
 
         # 先关闭 ESC 菜单(点了关之后菜单可能还开着)
-        # 注意:点"关"是在 ESC 菜单里点的,点完需要关菜单回到比赛画面
         self.close_esc_menu()
         time.sleep(2)
 
-        # 结算页模板(可能有多个:胜利/失败/通用)
-        end_templates = []
-        for name in ["result_win.png", "result_lose.png", "result_page.png"]:
-            p = _tpl(name)
-            if os.path.exists(p):
-                end_templates.append(p)
-        # 主菜单模板
-        menu_tpl = _tpl("main_menu_marker.png")
-        start_tpl = _tpl("start_match_button.png")
+        # 结算页标志文字 + 主菜单标志文字
+        end_texts = ["当家球星", "胜利", "失败", "结算", "比赛结束"]
+        menu_texts = ["开始比赛", "我的球队", "球员交易"]
 
         start = time.time()
         last_log = 0
         while time.time() - start < max_wait:
             if not window_utils.is_window_alive(self.hwnd):
                 log.warning("游戏窗口消失")
-                return True  # 窗口没了,视为结束
-            # 检测结算页
-            if end_templates:
-                r = vision.find_any(end_templates, hwnd=self.hwnd, threshold=0.80)
-                if r:
-                    log.info(f"检测到比赛结算页 [{os.path.basename(r[0])}]")
-                    return True
-            # 检测主菜单(关了托管后可能直接回菜单)
-            for mt in [menu_tpl, start_tpl]:
-                if os.path.exists(mt):
-                    r = vision.find_template(mt, hwnd=self.hwnd, threshold=0.85)
-                    if r:
-                        log.info("检测到回到主菜单,比赛已结束")
-                        return True
+                return True
+            # 检测结算页(OCR)
+            r = vision.find_any_text(self.hwnd, end_texts, timeout=0,
+                                     partial=True)
+            if r:
+                log.info(f"检测到比赛结算页 (OCR: {r[0]})")
+                return True
+            # 检测主菜单(OCR)
+            r = vision.find_any_text(self.hwnd, menu_texts, timeout=0,
+                                    partial=True)
+            if r:
+                log.info(f"检测到回到主菜单 (OCR: {r[0]})")
+                return True
             # 进度日志
             if time.time() - last_log > 60:
                 elapsed = int((time.time() - start) // 60)
