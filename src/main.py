@@ -54,21 +54,29 @@ def run_account(cfg, wg, account, is_first=False):
     log.info(f"▶ 开始处理 {label} (#{idx})")
     log.info(f"{'='*60}")
 
-    # 1. 切换账号(首个账号若 WeGame 已登录可跳过)
-    if not is_first:
+    # 1. 确认 WeGame 窗口并选账号
+    if not wg.find():
+        log.error("WeGame 未运行,请先打开 WeGame")
+        return False
+    wg.activate()
+    time.sleep(1)
+
+    if is_first:
+        # 首个账号:判断当前在登录界面还是主界面
+        log.info(">>> 步骤1: 首个账号,确认登录状态")
+        if wg.is_login_page():
+            log.info("在登录界面,选账号登录")
+            if not wg.select_account_on_login(idx):
+                log.error(f"登录 {label} 失败")
+                return False
+        else:
+            log.info("已在主界面(已登录),直接继续")
+    else:
+        # 后续账号:从头像切换账号回登录界面
         log.info(">>> 步骤1: 切换账号")
         if not wg.switch_to_account(idx):
             log.error(f"切换到 {label} 失败")
             return False
-        # 等待登录完成
-        if not wg.wait_account_logged_in(timeout=40):
-            log.warning("登录确认超时,继续尝试")
-    else:
-        log.info(">>> 步骤1: 首个账号,确认 WeGame 已就绪")
-        if not wg.find():
-            log.error("WeGame 未运行,请先打开 WeGame")
-            return False
-        wg.activate()
 
     # 2. 启动游戏
     log.info(">>> 步骤2: 启动游戏")
