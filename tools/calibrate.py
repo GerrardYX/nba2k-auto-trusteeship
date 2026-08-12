@@ -84,13 +84,14 @@ def save_template(img, category, name):
 
 def interactive_crop(img, title="框选区域"):
     """
-    交互式框选区域。4K 图自动缩小到 1920 宽显示(否则超出屏幕看不到),
-    框选后从【原图】按比例裁剪,保持高清模板。
-    操作:鼠标左键拖拽画矩形 → 按空格/回车确认 → 按 c 取消。
-    返回裁剪后的原图区域或 None。
+    交互式框选区域(自定义鼠标回调,不依赖 selectROI 键盘交互)。
+    4K 图自动缩小到 1920 宽显示,框选后从【原图】按比例裁剪,保持高清。
+    操作:
+      - 鼠标左键拖拽 = 画框(可反复画,新框覆盖旧框)
+      - 空格/回车 = 确认
+      - ESC / 右键 = 取消(返回 None)
     """
     h, w = img.shape[:2]
-    # 4K 等大图缩小到适合屏幕显示的尺寸
     max_w = 1920
     scale = 1.0
     disp = img
@@ -100,18 +101,76 @@ def interactive_crop(img, title="框选区域"):
         disp = cv2.resize(img, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
         print(f"  (原图 {w}x{h} 已缩小到 {disp_w}x{disp_h} 显示,框选后自动还原高清)")
 
-    print("  操作:鼠标拖拽画框 → 空格/回车确认 → c 取消重截")
-    roi = cv2.selectROI(title, disp, showCrosshair=True, fromCenter=False)
-    cv2.destroyAllWindows()
-    if roi[2] == 0 or roi[3] == 0:
-        print("未选择区域")
+    # 自定义框选状态
+    state = {"drawing": False, "box": None, "start": None, "confirmed": False, "cancelled": False}
+
+    def on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            state["drawing"] = True
+            state["start"] = (x, y)
+            state["box"] = [x, y, x, y]
+        elif event == cv2.EVENT_MOUSEMOVE and state["drawing"]:
+            state["box"] = [state["start"][0], state["start"][1], x, y]
+        elif event == cv2.EVENT_LBUTTONUP and state["drawing"]:
+            state["drawing"] = False
+            b = state["box"]
+            # 规范化(处理反向拖拽)
+            state["box"] = [min(b[0], b[2]), min(b[1], b[3]),
+                            max(b[0], b[2]), max(b[1], b[3])]
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            state["cancelled"] = True
+
+    win = title
+    cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
+    cv2.setMouseCallback(win, on_mouse)
+
+    print("  操作:鼠标拖拽画框(可重画) → 空格/回车确认 → ESC/右键取消")
+    print("  (如果键盘无反应,点一下图片窗口标题栏获取焦点再按)")
+
+    while True:
+        canvas = disp.copy()
+        # 画当前框
+        if state["box"]:
+            b = state["box"]
+            cv2.rectangle(canvas, (b[0], b[1]), (b[2], b[3]), (0, 255, 0), 2)
+            # 显示框尺寸(原图坐标)
+            rw_orig = int(abs(b[2] - b[0]) / scale)
+            rh_orig = int(abs(b[3] - b[1]) / scale)
+            cv2.putText(canvas, f"{rw_orig}x{rh_orig}", (b[0], b[1] - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        # 顶部提示
+        cv2.rectangle(canvas, (0, 0), (canvas.shape[1], 36), (0, 0, 0), -1)
+        hint = "Drag to select | SPACE=confirm | ESC=cancel"
+        cv2.putText(canvas, hint, (10, 25), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (255, 255, 255), 1)
+        cv2.imshow(win, canvas)
+
+        key = cv2.waitKey(30) & 0xFF
+        if key == 27:  # ESC
+            state["cancelled"] = True
+            break
+        if key == 32 or key == 13:  # 空格 or 回车
+            if state["box"] and not state["drawing"]:
+                state["confirmed"] = True
+                break
+        if state["cancelled"]:
+            break
+
+    cv2.destroyWindow(win)
+
+    if state["cancelled"] or not state["box"] or not state["confirmed"]:
+        print("已取消框选")
         return None
-    # 把缩小图上的坐标还原到原图坐标
-    x = int(roi[0] / scale)
-    y = int(roi[1] / scale)
-    rw = int(roi[2] / scale)
-    rh = int(roi[3] / scale)
-    # 从原图裁剪(高清)
+
+    b = state["box"]
+    # 还原到原图坐标
+    x = int(b[0] / scale)
+    y = int(b[1] / scale)
+    rw = int((b[2] - b[0]) / scale)
+    rh = int((b[3] - b[1]) / scale)
+    if rw < 5 or rh < 5:
+        print("框选区域太小,已忽略")
+        return None
     return img[y:y+rh, x:x+rw]
 
 
@@ -159,10 +218,19 @@ def capture_and_crop(name, grab_func=None, timeout=5):
                 if pw > 800:
                     ds = 800 / pw
                     disp = cv2.resize(cropped, (int(pw*ds), int(ph*ds)), interpolation=cv2.INTER_AREA)
-                cv2.imshow("预览: y=保存  n=重新截屏  任意键=重新框选", disp)
-                print("  预览窗口: 按 y 保存 / n 重新截屏 / 其他键 重新框选")
-                key = cv2.waitKey(0)
-                cv2.destroyAllWindows()
+                # 在预览图上叠加提示
+                ph2, pw2 = disp.shape[:2]
+                disp2 = disp.copy()
+                cv2.rectangle(disp2, (0, ph2 - 50), (pw2, ph2), (0, 0, 0), -1)
+                cv2.putText(disp2, "y=save | n=resnap | other=reselect", (8, ph2 - 18),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+                cv2.imshow("Preview", disp2)
+                print("  预览窗口: y=保存 / n=重新截屏 / 其他键=重新框选")
+                print("  (键盘无反应时点一下图片窗口获取焦点)")
+                key = None
+                while key is None:
+                    key = cv2.waitKey(100) & 0xFF
+                cv2.destroyWindow("Preview")
                 if key == ord('y') or key == ord('Y') or key == 13:
                     return cropped  # 满意,保存
                 elif key == ord('n') or key == ord('N'):
