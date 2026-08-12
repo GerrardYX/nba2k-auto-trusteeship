@@ -347,11 +347,10 @@ def probe_once_fullscreen(tag="probe"):
     print(f"输出目录: {outdir}")
     print(f"{'='*50}")
 
-    print("3秒后截屏...")
-    for i in range(3, 0, -1):
+    print("5秒后截屏,请Alt+Tab切到WeGame!")
+    for i in range(5, 0, -1):
         print(f"  {i}...")
         time.sleep(1)
-
     img = grab_fullscreen()
     if img is None:
         print("✗ 截图失败")
@@ -395,16 +394,27 @@ def probe_once_fullscreen(tag="probe"):
 def diff_mode_fullscreen():
     """全屏版变化检测"""
     print("\n=== 变化检测模式(全屏) ===")
-    print("1. 按回车截'操作前'画面")
-    input("按回车...")
+    print("流程: 按回车 → 5秒倒计时(切到WeGame) → 截图1")
+    print("      手动操作(点箭头) → 按回车 → 5秒倒计时 → 截图2 → 对比")
+    print()
+    
+    input("准备好后按回车开始截'操作前'画面...")
+    print(">>> 5秒后截图,请Alt+Tab切到WeGame! <<<")
+    for i in range(5, 0, -1):
+        print(f"  {i}...")
+        time.sleep(1)
     img_before = grab_fullscreen()
     if img_before is None:
         print("✗ 截图失败")
         return
-    print(f"✓ 操作前截图 ({img_before.shape[1]}x{img_before.shape[0]})")
+    print(f"✓ 操作前截图完成 ({img_before.shape[1]}x{img_before.shape[0]})")
 
-    print("\n2. 现在手动操作(比如点下拉箭头)")
+    print("\n2. 现在手动操作(比如点下拉箭头展开列表)")
     input("操作完后按回车截'操作后'画面...")
+    print(">>> 5秒后截图,请Alt+Tab切到WeGame! <<<")
+    for i in range(5, 0, -1):
+        print(f"  {i}...")
+        time.sleep(1)
     img_after = grab_fullscreen()
     if img_after is None:
         print("✗ 截图失败")
