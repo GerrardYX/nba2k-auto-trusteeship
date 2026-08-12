@@ -174,64 +174,115 @@ class WeGameController:
     def _select_account_from_list(self, index):
         """
         在账号切换列表中选第 index 个(1~6)。
+        自动检测列表位置:先截图 OCR 找账号 ID,定位每个条目坐标。
         一屏显示约 4 个,前 4 个直接点,后 2 个需向下滚动。
         """
-        visible_count = 4  # 一屏可见数量
+        visible_count = 4
         first_y = self.acc_cfg.get("first_item_y", 0)
         item_h = self.acc_cfg.get("item_height", 80)
         list_roi = self.acc_cfg.get("list_roi", []) or None
         scroll_steps = self.acc_cfg.get("scroll_steps_for_tail", 3)
 
+        # 如果没配置坐标,自动检测
+        if first_y == 0 or not list_roi:
+            log.info("未配置账号列表坐标,自动检测...")
+            detected = self._detect_account_list()
+            if detected:
+                first_y, item_h, list_roi = detected
+                log.info(f"自动检测到: first_y={first_y} item_h={item_h} list_roi={list_roi}")
+            else:
+                log.error("无法自动检测账号列表位置")
+                Logger.screenshot("account_list_detect_fail")
+                return False
+
+        cx = (list_roi[0] + list_roi[2]) // 2
+
         if index <= visible_count:
             # 直接点击第 index 个
-            if first_y == 0:
-                log.error("未配置账号列表坐标,请运行校准工具")
-                return False
             y = first_y + (index - 1) * item_h
-            # X 坐标取列表中央(校准工具会写入 list_roi)
-            if list_roi:
-                x = (list_roi[0] + list_roi[2]) // 2
-            else:
-                log.error("未配置列表 ROI,请运行校准工具")
-                return False
-            log.info(f"点击账号 #{index} 列表位置 ({x},{y})")
-            vision.click(x, y, hwnd=self.hwnd)
+            log.info(f"点击账号 #{index} 列表位置 ({cx},{y})")
+            vision.click(cx, y, hwnd=self.hwnd)
             time.sleep(2)
             return True
         else:
             # 需要先滚动
             log.info(f"账号 #{index} 在列表下方,滚动后选择")
-            if not list_roi:
-                log.error("未配置列表 ROI")
-                return False
-            cx = (list_roi[0] + list_roi[2]) // 2
             cy = (list_roi[1] + list_roi[3]) // 2
-
-            # 在列表区域滚动
             import pyautogui
             vision.click(cx, cy, hwnd=self.hwnd)  # 先聚焦
             time.sleep(0.5)
             for _ in range(scroll_steps):
                 if not vision.VisionConfig.dry_run:
-                    pyautogui.scroll(-3)  # 向下滚
+                    pyautogui.scroll(-3)
                 else:
                     log.info("[DRY-RUN] 向下滚动")
                 time.sleep(0.3)
             time.sleep(0.5)
-
-            # 滚动后,第 index 个账号出现在可见区。
-            # 滚动 1 格 ≈ 1 个条目,滚动 scroll_steps 后,
-            # 第 (index) 个对应可见位置 index - scroll_steps
             visible_index = index - scroll_steps
-            if first_y == 0:
-                log.error("未配置列表坐标")
-                return False
             y = first_y + (visible_index - 1) * item_h
-            x = (list_roi[0] + list_roi[2]) // 2
-            log.info(f"滚动后点击账号 #{index} 位置 ({x},{y})")
-            vision.click(x, y, hwnd=self.hwnd)
+            log.info(f"滚动后点击账号 #{index} 位置 ({cx},{y})")
+            vision.click(cx, y, hwnd=self.hwnd)
             time.sleep(2)
             return True
+
+    def _detect_account_list(self):
+        """
+        自动检测账号列表位置:截图 WeGame 窗口,OCR 找账号 ID(QQ号)。
+        返回 (first_y, item_height, list_roi) 或 None。
+        """
+        try:
+            import pytesseract
+            result = vision.grab_window(self.hwnd)
+            if not result or result[0] is None:
+                return None
+            screen, _ = result
+            gray = vision.cv2.cvtColor(screen, vision.cv2.COLOR_BGR2GRAY)
+            data = pytesseract.image_to_data(
+                gray, lang='eng',
+                config='--psm 11 -c tessedit_char_whitelist=0123456789',
+                output_type=vision.pytesseract.Output.DICT)
+            # 找纯数字、长度>=6的(账号ID)
+            accounts = []
+            for i in range(len(data['text'])):
+                t = data['text'][i].strip()
+                if t and t.isdigit() and len(t) >= 6:
+                    cy = data['top'][i] + data['height'][i] // 2
+                    accounts.append({
+                        'text': t, 'left': data['left'][i],
+                        'top': data['top'][i], 'w': data['width'][i],
+                        'h': data['height'][i], 'cy': cy
+                    })
+            if len(accounts) < 2:
+                log.warning(f"OCR 只找到 {len(accounts)} 个账号ID")
+                if accounts:
+                    # 只找到一个,也能用
+                    pass
+                else:
+                    return None
+
+            # 按Y排序
+            accounts.sort(key=lambda a: a['cy'])
+            y_vals = [a['cy'] for a in accounts]
+            first_y = y_vals[0]
+            # 条目高度 = 相邻账号的Y间距
+            if len(y_vals) >= 2:
+                gaps = [y_vals[i+1] - y_vals[i] for i in range(len(y_vals)-1)]
+                item_h = int(sum(gaps) / len(gaps))
+            else:
+                item_h = 80
+
+            # 列表区域
+            list_x0 = min(a['left'] for a in accounts) - 60
+            list_x1 = max(a['left'] + a['w'] for a in accounts) + 60
+            list_y0 = first_y - item_h // 2
+            list_y1 = y_vals[-1] + item_h // 2
+            list_roi = [list_x0, list_y0, list_x1, list_y1]
+
+            log.info(f"检测到 {len(accounts)} 个账号: {[a['text'] for a in accounts]}")
+            return (first_y, item_h, list_roi)
+        except Exception as e:
+            log.warning(f"自动检测账号列表失败: {e}")
+            return None
 
     # ----------------------------------------------------------
     # 确认账号已登录

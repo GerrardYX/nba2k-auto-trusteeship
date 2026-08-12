@@ -442,19 +442,22 @@ def read_number(hwnd, roi, scale=3, psm=7):
 def read_remaining_trusteeship(hwnd, cfg):
     """
     读取剩余托管次数。
-    根据 settings.yaml 的 trusteeship_status 配置解析。
+    若配置了 remaining_count_roi 则用该区域;否则自动在全窗口搜索数字。
     返回 remaining (int) 或 None。
     """
     ts = cfg.get("trusteeship_status", {})
     roi = ts.get("remaining_count_roi", [])
-    if not roi:
-        log.warning("未配置托管次数 ROI,请运行校准工具")
-        return None
-
     max_games = ts.get("max_games", 20)
     fmt = ts.get("display_format", "remaining/max")
 
-    text = ocr_region(hwnd, roi, digit_only=True, scale=3, psm=7)
+    if roi:
+        # 用配置的区域
+        text = ocr_region(hwnd, roi, digit_only=True, scale=3, psm=7)
+    else:
+        # 自动检测:全窗口 OCR,找 X/Y 格式的数字
+        log.info("未配置托管次数 ROI,自动全窗口搜索...")
+        text = _auto_find_trustee_count(hwnd)
+
     log.info(f"托管次数 OCR 原文: {text!r}")
 
     import re
@@ -482,4 +485,39 @@ def read_remaining_trusteeship(hwnd, cfg):
         return remaining
 
     log.warning(f"无法解析托管次数: {text!r}")
+    return None
+
+
+def _auto_find_trustee_count(hwnd):
+    """
+    自动在全窗口搜索托管次数(格式 X/Y,如 15/20)。
+    在顶部区域(ESC菜单信息通常在顶部)用 OCR 找。
+    """
+    if not _TESS or not _CV2:
+        return ""
+    result = grab_window(hwnd)
+    if not result or result[0] is None:
+        return ""
+    screen, _ = result
+    h, w = screen.shape[:2]
+    # 搜索顶部 1/3 区域(ESC菜单的托管信息在顶部)
+    top = screen[0:int(h*0.4), :]
+    gray = cv2.cvtColor(top, cv2.COLOR_BGR2GRAY)
+    # 放大
+    gray = cv2.resize(gray, (gray.shape[1]*2, gray.shape[0]*2),
+                      interpolation=cv2.INTER_CUBIC)
+    gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
+    # 用 psm 11(稀疏文本)找所有文字
+    data = pytesseract.image_to_data(
+        gray, lang='eng',
+        config='--psm 11 -c tessedit_char_whitelist=0123456789/',
+        output_type=pytesseract.Output.DICT)
+    # 收集所有数字片段
+    fragments = []
+    for i in range(len(data['text'])):
+        t = data['text'][i].strip()
+        if t:
+            fragments.append(t)
+    full_text = ' '.join(fragments)
+    return full_text
     return None
