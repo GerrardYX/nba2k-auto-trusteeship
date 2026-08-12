@@ -1,10 +1,14 @@
 """
-vision.py - 图像识别与 OCR 引擎
-负责:屏幕截图、模板匹配、OCR 读数、等待元素、点击。
-所有 ROI 坐标基于【目标窗口客户区左上角(0,0)】。
+vision.py - 图像识别与 OCR 引擎(纯元素识别,无硬编码坐标)
+核心能力:
+  - OCR 文字查找/点击(find_text, click_text)
+  - OCR 可视化调试(visual_debug,让用户看到程序识别到什么)
+  - 屏幕截图(基于窗口客户区)
+  - 模板匹配(备用,多尺度)
 """
 import os
 import time
+import platform
 
 import numpy as np
 
@@ -16,7 +20,7 @@ except ImportError:
 
 try:
     import pyautogui
-    pyautogui.FAILSAFE = False  # 禁用移到左上角触发异常
+    pyautogui.FAILSAFE = False
     pyautogui.PAUSE = 0.1
     _PAG = True
 except ImportError:
@@ -36,8 +40,7 @@ except ImportError:
 
 try:
     import pytesseract
-    # Windows 上设置 tesseract 路径(常见安装位置)
-    import platform
+    # Windows 自动找 tesseract
     if platform.system() == "Windows":
         for p in [r"C:\Program Files\Tesseract-OCR\tesseract.exe",
                   r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"]:
@@ -54,48 +57,28 @@ from logger import get_logger, Logger
 log = get_logger()
 
 
-# ============================================================
-# 配置
-# ============================================================
 class VisionConfig:
-    confidence_threshold = 0.82
-    grayscale = True
-    multi_scale = True
-    scale_range = (0.5, 2.0)
-    scale_steps = 10
-    dry_run = False  # True 时只识别不点击
-    step_pause = False  # True 时每步暂停等回车
+    dry_run = False
+    step_pause = False
 
 
 def load_config(config_path="config/settings.yaml"):
-    """从 settings.yaml 加载视觉配置"""
     try:
         import yaml
         with open(config_path, "r", encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
-        v = cfg.get("vision", {})
-        VisionConfig.confidence_threshold = v.get("confidence_threshold", 0.82)
-        VisionConfig.grayscale = v.get("grayscale", True)
-        VisionConfig.multi_scale = v.get("multi_scale", True)
-        VisionConfig.scale_range = tuple(v.get("scale_range", [0.5, 2.0]))
-        VisionConfig.scale_steps = v.get("scale_steps", 10)
         rt = cfg.get("runtime", {})
         mode = rt.get("mode", "normal")
         VisionConfig.dry_run = (mode == "dry_run")
         VisionConfig.step_pause = (mode == "step_pause")
     except Exception as e:
-        log.warning(f"加载视觉配置失败,使用默认: {e}")
+        log.warning(f"加载配置失败: {e}")
 
 
 # ============================================================
 # 截图
 # ============================================================
 def grab_screen(region=None):
-    """
-    截取屏幕区域。
-    region: (left, top, width, height) 屏幕物理坐标。None=全屏。
-    返回 numpy BGR 图像。
-    """
     if _MSS:
         with mss.MSS() as sct:
             if region:
@@ -104,19 +87,16 @@ def grab_screen(region=None):
             else:
                 monitor = sct.monitors[1]
             shot = sct.grab(monitor)
-            img = np.array(shot)
-            # BGRA -> BGR
-            return img[:, :, :3]
+            return np.array(shot)[:, :, :3]
     elif _PAG:
         im = pyautogui.screenshot(region=region if region else None)
         return cv2.cvtColor(np.array(im), cv2.COLOR_RGB2BGR) if _CV2 else None
     else:
-        log.error("无可用截图库(mss/pyautogui)")
+        log.error("无可用截图库")
         return None
 
 
 def grab_window(hwnd):
-    """截取指定窗口的客户区"""
     rect = window_utils.get_client_rect_screen(hwnd)
     if not rect:
         return None
@@ -125,7 +105,6 @@ def grab_window(hwnd):
 
 
 def save_screenshot(path, region=None):
-    """保存截图到文件(供 logger 调用)"""
     img = grab_screen(region)
     if img is not None and _CV2:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -134,182 +113,213 @@ def save_screenshot(path, region=None):
     return False
 
 
-# 注册截图函数到 logger
 Logger.set_screenshot_func(save_screenshot)
 
 
 # ============================================================
-# 模板匹配
+# OCR 文字查找与点击(核心:纯元素识别)
 # ============================================================
-def _match_single(screen, template, threshold, grayscale):
-    """单尺度模板匹配,返回 (cx, cy, confidence) 或 None"""
-    if screen is None or template is None:
-        return None
-    if grayscale:
-        s = cv2.cvtColor(screen, cv2.COLOR_BGR2GRAY)
-        t = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-    else:
-        s, t = screen, template
-    if s.shape[0] < t.shape[0] or s.shape[1] < t.shape[1]:
-        return None
-    res = cv2.matchTemplate(s, t, cv2.TM_CCOEFF_NORMED)
-    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
-    if max_val >= threshold:
-        cx = max_loc[0] + t.shape[1] // 2
-        cy = max_loc[1] + t.shape[0] // 2
-        return (cx, cy, float(max_val))
-    return None
+def _ocr_full(hwnd, roi=None):
+    """对窗口截图做 OCR,返回所有文字块的列表"""
+    if not _TESS or not _CV2:
+        log.error("需要 pytesseract + opencv")
+        return []
 
+    result = grab_window(hwnd)
+    if not result or result[0] is None:
+        return []
+    screen, _ = result
 
-def _match_multi_scale(screen, template, threshold, grayscale, scale_range, steps):
-    """多尺度模板匹配"""
-    if screen is None or template is None:
-        return None
-    best = None
-    best_conf = threshold
-    th, tw = template.shape[:2]
-    for scale in np.linspace(scale_range[0], scale_range[1], steps):
-        nw, nh = int(tw * scale), int(th * scale)
-        if nw < 5 or nh < 5:
-            continue
-        if nw > screen.shape[1] or nh > screen.shape[0]:
-            continue
-        scaled = cv2.resize(template, (nw, nh), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
-        r = _match_single(screen, scaled, best_conf, grayscale)
-        if r and r[2] > best_conf:
-            best_conf = r[2]
-            best = r
-    return best
-
-
-def find_template(template_path, hwnd=None, roi=None, threshold=None):
-    """
-    在窗口客户区(或指定 ROI)中查找模板图像。
-    template_path: 模板图片路径
-    hwnd: 目标窗口;None=全屏
-    roi: [x0,y0,x1,y1] 客户区内坐标;None=全窗口
-    返回 {'x','y','confidence','rect'} (客户区坐标) 或 None
-    """
-    if not _CV2:
-        log.error("需要 opencv")
-        return None
-    if not os.path.exists(template_path):
-        log.warning(f"模板不存在: {template_path}")
-        return None
-
-    template = cv2.imread(template_path, cv2.IMREAD_COLOR)
-    if template is None:
-        log.warning(f"无法读取模板: {template_path}")
-        return None
-
-    th = threshold or VisionConfig.confidence_threshold
-
-    # 截图
-    if hwnd:
-        result = grab_window(hwnd)
-        if not result or result[0] is None:
-            return None
-        screen, win_rect = result
-        offset_x, offset_y = 0, 0  # 客户区坐标,左上角为0
-    else:
-        screen = grab_screen()
-        if screen is None:
-            return None
-        win_rect = None
-        offset_x, offset_y = 0, 0
-
-    # 裁剪 ROI
+    search_area = screen
+    off_x, off_y = 0, 0
     if roi:
         x0, y0, x1, y1 = roi
         x0, y0 = max(0, x0), max(0, y0)
         x1 = min(screen.shape[1], x1)
         y1 = min(screen.shape[0], y1)
         if x1 <= x0 or y1 <= y0:
-            log.warning(f"ROI 无效: {roi}")
-            return None
+            return []
         search_area = screen[y0:y1, x0:x1]
-        offset_x, offset_y = x0, y0
-    else:
-        search_area = screen
+        off_x, off_y = x0, y0
 
-    # 匹配
-    if VisionConfig.multi_scale:
-        match = _match_multi_scale(search_area, template, th,
-                                   VisionConfig.grayscale,
-                                   VisionConfig.scale_range,
-                                   VisionConfig.scale_steps)
-    else:
-        match = _match_single(search_area, template, th, VisionConfig.grayscale)
+    # 放大2x提升精度
+    sh, sw = search_area.shape[:2]
+    scaled = cv2.resize(search_area, (sw * 2, sh * 2),
+                        interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
 
-    if match:
-        cx, cy, conf = match
-        # 还原到客户区坐标
-        gx = cx + offset_x
-        gy = cy + offset_y
-        log.debug(f"匹配成功 [{os.path.basename(template_path)}] "
-                  f"置信度={conf:.3f} 位置=({gx},{gy})")
-        return {
-            "x": gx, "y": gy, "confidence": conf,
-            "rect": [gx - template.shape[1]//2, gy - template.shape[0]//2,
-                     gx + template.shape[1]//2, gy + template.shape[0]//2]
-        }
-    log.debug(f"未匹配 [{os.path.basename(template_path)}] 阈值={th}")
+    try:
+        data = pytesseract.image_to_data(
+            gray, lang='chi_sim+eng', config='--psm 11',
+            output_type=pytesseract.Output.DICT)
+    except Exception as e:
+        log.error(f"OCR 失败(检查 Tesseract 安装): {e}")
+        return []
+
+    # 合并同行文字块
+    blocks = {}
+    for i in range(len(data['text'])):
+        t = data['text'][i].strip()
+        if not t:
+            continue
+        key = (data['block_num'][i], data['line_num'][i])
+        if key not in blocks:
+            blocks[key] = {'texts': [], 'x': data['left'][i], 'y': data['top'][i],
+                           'x1': data['left'][i] + data['width'][i],
+                           'y1': data['top'][i] + data['height'][i]}
+        blocks[key]['texts'].append(t)
+        blocks[key]['x'] = min(blocks[key]['x'], data['left'][i])
+        blocks[key]['y'] = min(blocks[key]['y'], data['top'][i])
+        blocks[key]['x1'] = max(blocks[key]['x1'], data['left'][i] + data['width'][i])
+        blocks[key]['y1'] = max(blocks[key]['y1'], data['top'][i] + data['height'][i])
+
+    results = []
+    for key, b in blocks.items():
+        full = ''.join(b['texts']).replace(' ', '')
+        # 还原到原图坐标(除以2缩放 + 偏移)
+        cx = int((b['x'] + b['x1']) / 2 / 2) + off_x
+        cy = int((b['y'] + b['y1']) / 2 / 2) + off_y
+        results.append({'text': full, 'x': cx, 'y': cy,
+                        'x0': int(b['x'] / 2) + off_x,
+                        'y0': int(b['y'] / 2) + off_y,
+                        'x1': int(b['x1'] / 2) + off_x,
+                        'y1': int(b['y1'] / 2) + off_y})
+    return results
+
+
+def find_text(hwnd, text, roi=None, timeout=10, interval=0.8, partial=True):
+    """
+    OCR 查找文字,返回中心坐标或 None。
+    partial: True=包含匹配(如"开始"匹配"开始比赛")
+    """
+    log.info(f"OCR 查找 [{text}] 超时={timeout}s")
+    target = text.replace(' ', '')
+    start = time.time()
+
+    while True:
+        blocks = _ocr_full(hwnd, roi)
+        for b in blocks:
+            if partial:
+                match = target in b['text'] or b['text'] in target
+            else:
+                match = (b['text'] == target)
+            if match:
+                log.info(f"✓ 找到 [{text}] 于 ({b['x']},{b['y']}) 原文={b['text']}")
+                return b
+        if time.time() - start >= timeout:
+            log.warning(f"✗ 未找到 [{text}]")
+            if timeout > 0:
+                Logger.screenshot(f"ocr_fail_{text}")
+            return None
+        time.sleep(interval)
+
+
+def find_any_text(hwnd, texts, roi=None, timeout=10, interval=0.8, partial=True):
+    """查找多个文字中任一"""
+    log.info(f"OCR 查找任一 {texts} 超时={timeout}s")
+    start = time.time()
+    while time.time() - start < timeout:
+        blocks = _ocr_full(hwnd, roi)
+        for b in blocks:
+            for t in texts:
+                target = t.replace(' ', '')
+                if partial:
+                    match = target in b['text'] or b['text'] in target
+                else:
+                    match = (b['text'] == target)
+                if match:
+                    log.info(f"✓ 找到 [{t}] 于 ({b['x']},{b['y']})")
+                    return (t, b)
+        if timeout == 0:
+            return None
+        time.sleep(interval)
+    log.warning(f"✗ 未找到 {texts}")
     return None
 
 
-def find_any(templates, hwnd=None, roi=None, threshold=None):
-    """在多个模板中找第一个匹配的,返回 (template_path, result) 或 None"""
-    for tp in templates:
-        r = find_template(tp, hwnd=hwnd, roi=roi, threshold=threshold)
-        if r:
-            return (tp, r)
-    return None
+def find_all_numbers(hwnd, roi=None, timeout=5):
+    """查找窗口中所有纯数字块(用于找QQ号),返回列表"""
+    log.info(f"OCR 查找数字 超时={timeout}s")
+    start = time.time()
+    while True:
+        blocks = _ocr_full(hwnd, roi)
+        numbers = []
+        for b in blocks:
+            t = b['text']
+            if t.isdigit() and len(t) >= 6:
+                numbers.append(b)
+        if numbers:
+            numbers.sort(key=lambda a: a['y'])
+            log.info(f"找到 {len(numbers)} 个数字: {[n['text'] for n in numbers]}")
+            return numbers
+        if time.time() - start >= timeout:
+            return []
+        time.sleep(0.5)
+
+
+def click_text(hwnd, text, roi=None, timeout=10, partial=True):
+    """OCR 查找文字并点击"""
+    r = find_text(hwnd, text, roi=roi, timeout=timeout, partial=partial)
+    if r:
+        return click(r['x'], r['y'], hwnd=hwnd)
+    return False
 
 
 # ============================================================
-# 等待元素
+# 可视化调试:让用户看到程序"看到"了什么
 # ============================================================
-def wait_for(template_path, hwnd=None, roi=None, timeout=15, interval=0.8, threshold=None):
+def visual_debug(hwnd, title="OCR Debug"):
     """
-    等待模板出现。返回 result 或 None(超时)。
+    截图窗口,OCR 识别所有文字,画框标注,显示给用户。
+    让用户直观看到程序识别到了哪些文字、在什么位置。
+    纯鼠标关闭(点击窗口按任意键或关闭)。
     """
-    log.info(f"等待元素 [{os.path.basename(template_path)}] 超时={timeout}s")
-    start = time.time()
-    while time.time() - start < timeout:
-        r = find_template(template_path, hwnd=hwnd, roi=roi, threshold=threshold)
-        if r:
-            return r
-        time.sleep(interval)
-    log.warning(f"等待超时 [{os.path.basename(template_path)}]")
-    Logger.screenshot(f"timeout_{os.path.basename(template_path)}")
-    return None
+    if not _CV2 or not _TESS:
+        log.error("需要 cv2 + pytesseract")
+        return
 
+    result = grab_window(hwnd)
+    if not result or result[0] is None:
+        log.error("截图失败")
+        return
+    screen, _ = result
 
-def wait_for_any(templates, hwnd=None, roi=None, timeout=15, interval=0.8, threshold=None):
-    """等待多个模板中任一出现。返回 (template_path, result) 或 None"""
-    names = [os.path.basename(t) for t in templates]
-    log.info(f"等待任一元素 {names} 超时={timeout}s")
-    start = time.time()
-    while time.time() - start < timeout:
-        r = find_any(templates, hwnd=hwnd, roi=roi, threshold=threshold)
-        if r:
-            return r
-        time.sleep(interval)
-    log.warning(f"等待超时 {names}")
-    Logger.screenshot("timeout_multi")
-    return None
+    # 缩小显示(4K等大图)
+    h, w = screen.shape[:2]
+    max_w = 1600
+    scale = 1.0
+    disp = screen
+    if w > max_w:
+        scale = max_w / w
+        disp = cv2.resize(screen, (int(w * scale), int(h * scale)),
+                          interpolation=cv2.INTER_AREA)
+
+    blocks = _ocr_full(hwnd)
+    # 在缩小图上画框
+    for b in blocks:
+        x0 = int(b['x0'] * scale)
+        y0 = int(b['y0'] * scale)
+        x1 = int(b['x1'] * scale)
+        y1 = int(b['y1'] * scale)
+        cv2.rectangle(disp, (x0, y0), (x1, y1), (0, 255, 0), 2)
+        # 标注文字(缩小后可能太小,截断)
+        label = b['text'][:15]
+        cv2.putText(disp, label, (x0, max(y0 - 5, 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
+    log.info(f"OCR 识别到 {len(blocks)} 个文字块")
+    for b in blocks:
+        log.info(f"  ({b['x']},{b['y']}) {b['text']}")
+
+    cv2.imshow(title, disp)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
 
 
 # ============================================================
 # 点击
 # ============================================================
 def click(x, y, hwnd=None, button="left", clicks=1, delay_before=0.2):
-    """
-    点击客户区坐标 (x,y)。
-    若提供 hwnd,坐标会转换为屏幕坐标后点击。
-    dry_run 模式下只移动不点击。
-    """
-    # 转换为屏幕坐标
     if hwnd:
         rect = window_utils.get_client_rect_screen(hwnd)
         if rect:
@@ -327,196 +337,67 @@ def click(x, y, hwnd=None, button="left", clicks=1, delay_before=0.2):
         return True
 
     if VisionConfig.step_pause:
-        input(f"[STEP] 即将点击 ({x},{y}) 屏幕({screen_x},{screen_y}) 回车继续...")
+        input(f"[STEP] 即将点击 ({x},{y}) 回车继续...")
 
     if not _PAG:
-        log.error("需要 pyautogui 才能点击")
+        log.error("需要 pyautogui")
         return False
 
     time.sleep(delay_before)
-    pyautogui.click(screen_x, screen_y, clicks=clicks, button=button,
-                    _pause=False)
+    pyautogui.click(screen_x, screen_y, clicks=clicks, button=button, _pause=False)
     log.debug(f"点击 ({x},{y}) -> 屏幕({screen_x},{screen_y})")
     return True
 
 
-def click_template(template_path, hwnd=None, roi=None, timeout=15, threshold=None):
-    """查找模板并点击其中心。返回 True/False"""
-    r = wait_for(template_path, hwnd=hwnd, roi=roi, timeout=timeout, threshold=threshold)
-    if r:
-        return click(r["x"], r["y"], hwnd=hwnd)
-    return False
+def click_relative_to(element, dx, dy, hwnd=None):
+    """
+    在找到的元素旁边点击(相对偏移)。
+    element: find_text 返回的 {'x','y',...}
+    dx, dy: 相对元素中心的偏移(像素)
+    用于点击元素旁边的图标(如账号号旁边的下拉箭头)。
+    """
+    x = element['x'] + dx
+    y = element['y'] + dy
+    log.info(f"在元素 {element.get('text','')} 旁偏移({dx},{dy}) 点击 ({x},{y})")
+    return click(x, y, hwnd=hwnd)
 
 
 def press_key(key, presses=1, interval=0.1):
-    """按键"""
     if VisionConfig.dry_run:
-        log.info(f"[DRY-RUN] 按键 {key} [不执行]")
+        log.info(f"[DRY-RUN] 按键 {key}")
         return True
     if not _PAG:
-        log.error("需要 pyautogui")
         return False
     if VisionConfig.step_pause:
-        input(f"[STEP] 即将按键 {key} 回车继续...")
+        input(f"[STEP] 按键 {key} 回车继续...")
     for _ in range(presses):
         pyautogui.press(key, _pause=False)
         time.sleep(interval)
-    log.debug(f"按键 {key}x{presses}")
     return True
 
 
 def hotkey(*keys):
-    """组合键,如 hotkey('alt','f4')"""
     if VisionConfig.dry_run:
-        log.info(f"[DRY-RUN] 组合键 {keys} [不执行]")
+        log.info(f"[DRY-RUN] 组合键 {keys}")
         return True
     if not _PAG:
-        log.error("需要 pyautogui")
         return False
     if VisionConfig.step_pause:
-        input(f"[STEP] 即将组合键 {keys} 回车继续...")
+        input(f"[STEP] 组合键 {keys} 回车继续...")
     pyautogui.hotkey(*keys, _pause=False)
-    log.debug(f"组合键 {keys}")
     return True
 
 
 # ============================================================
-# OCR 文字查找与点击
-# ============================================================
-def find_text(hwnd, text, roi=None, timeout=10, interval=0.8, partial=True):
-    """
-    在窗口客户区用 OCR 查找文字,返回中心坐标或 None。
-    text: 要查找的文字(如"开始比赛"、"连续托管"、"切换账号")
-    roi: [x0,y0,x1,y1] 限定区域;None=全窗口
-    partial: True=文字包含即匹配(如"开始"匹配"开始比赛")
-    timeout: 等待超时(秒),0=只查一次
-    返回 {'x','y','text'} 或 None
-    """
-    if not _TESS or not _CV2:
-        log.error("需要 pytesseract + opencv")
-        return None
-
-    log.info(f"OCR 查找文字 [{text}] 超时={timeout}s")
-    start = time.time()
-    while True:
-        result = grab_window(hwnd)
-        if not result or result[0] is None:
-            if time.time() - start >= timeout:
-                return None
-            time.sleep(interval)
-            continue
-        screen, _ = result
-
-        search_area = screen
-        off_x, off_y = 0, 0
-        if roi:
-            x0, y0, x1, y1 = roi
-            x0, y0 = max(0, x0), max(0, y0)
-            x1 = min(screen.shape[1], x1)
-            y1 = min(screen.shape[0], y1)
-            if x1 <= x0 or y1 <= y0:
-                return None
-            search_area = screen[y0:y1, x0:x1]
-            off_x, off_y = x0, y0
-
-        # 放大2x 提升 OCR 精度
-        sh, sw = search_area.shape[:2]
-        scaled = cv2.resize(search_area, (sw * 2, sh * 2),
-                            interpolation=cv2.INTER_CUBIC)
-        gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
-
-        try:
-            data = pytesseract.image_to_data(
-                gray, lang='chi_sim+eng', config='--psm 11',
-                output_type=pytesseract.Output.DICT)
-        except Exception as e:
-            log.error(f"OCR 调用失败(请确认 Tesseract 已安装): {e}")
-            if time.time() - start >= timeout:
-                return None
-            time.sleep(interval)
-            continue
-
-        # 收集所有文字块,合并同行
-        blocks = {}
-        for i in range(len(data['text'])):
-            t = data['text'][i].strip()
-            if not t:
-                continue
-            key = (data['block_num'][i], data['line_num'][i])
-            if key not in blocks:
-                blocks[key] = {'texts': [], 'x': data['left'][i],
-                               'y': data['top'][i],
-                               'x1': data['left'][i] + data['width'][i],
-                               'y1': data['top'][i] + data['height'][i]}
-            blocks[key]['texts'].append(t)
-            blocks[key]['x'] = min(blocks[key]['x'], data['left'][i])
-            blocks[key]['y'] = min(blocks[key]['y'], data['top'][i])
-            blocks[key]['x1'] = max(blocks[key]['x1'],
-                                    data['left'][i] + data['width'][i])
-            blocks[key]['y1'] = max(blocks[key]['y1'],
-                                    data['top'][i] + data['height'][i])
-
-        for key, b in blocks.items():
-            full = ''.join(b['texts']).replace(' ', '')
-            if partial:
-                match = text.replace(' ', '') in full or full in text.replace(' ', '')
-            else:
-                match = (full == text.replace(' ', ''))
-            if match:
-                # 中心坐标(还原缩放和偏移)
-                cx = int((b['x'] + b['x1']) / 2 / 2) + off_x
-                cy = int((b['y'] + b['y1']) / 2 / 2) + off_y
-                log.info(f"✓ 找到 [{text}] 于 ({cx},{cy}) 原文={full}")
-                return {'x': cx, 'y': cy, 'text': full}
-
-        if time.time() - start >= timeout:
-            log.warning(f"✗ OCR 未找到 [{text}]")
-            Logger.screenshot(f"ocr_fail_{text}")
-            return None
-        time.sleep(interval)
-
-
-def find_any_text(hwnd, texts, roi=None, timeout=10, interval=0.8, partial=True):
-    """查找多个文字中任一,返回 (匹配文字, result) 或 None"""
-    log.info(f"OCR 查找任一文字 {texts} 超时={timeout}s")
-    start = time.time()
-    while time.time() - start < timeout:
-        for t in texts:
-            r = find_text(hwnd, t, roi=roi, timeout=0, partial=partial)
-            if r:
-                return (t, r)
-        time.sleep(interval)
-    log.warning(f"✗ OCR 未找到 {texts} 任一")
-    return None
-
-
-def click_text(hwnd, text, roi=None, timeout=10, partial=True):
-    """OCR 查找文字并点击其中心。返回 True/False"""
-    r = find_text(hwnd, text, roi=roi, timeout=timeout, partial=partial)
-    if r:
-        return click(r['x'], r['y'], hwnd=hwnd)
-    return False
-
-
-# ============================================================
-# OCR 数字识别(原有功能)
+# OCR 数字识别
 # ============================================================
 def ocr_region(hwnd, roi, digit_only=False, scale=2, psm=7):
-    """
-    OCR 识别窗口客户区 ROI 内的文字。
-    roi: [x0,y0,x1,y1]
-    digit_only: True 只识别数字
-    返回识别到的字符串(已 strip)。
-    """
     if not _TESS or not _CV2:
-        log.error("需要 pytesseract + opencv")
         return ""
-
     result = grab_window(hwnd)
     if not result or result[0] is None:
         return ""
     screen, _ = result
-
     x0, y0, x1, y1 = roi
     x0, y0 = max(0, x0), max(0, y0)
     x1 = min(screen.shape[1], x1)
@@ -524,126 +405,66 @@ def ocr_region(hwnd, roi, digit_only=False, scale=2, psm=7):
     region = screen[y0:y1, x0:x1]
     if region.size == 0:
         return ""
-
-    # 放大
     if scale != 1:
         h, w = region.shape[:2]
         region = cv2.resize(region, (w * scale, h * scale), interpolation=cv2.INTER_CUBIC)
-
     gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-    # 二值化(对数字更稳)
     gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-
     config = f"--psm {psm}"
     if digit_only:
         config += " -c tessedit_char_whitelist=0123456789/"
-
     lang = "eng" if digit_only else "chi_sim+eng"
     try:
         text = pytesseract.image_to_string(gray, lang=lang, config=config)
-        text = text.strip()
-        log.debug(f"OCR roi={roi} -> {text!r}")
-        return text
+        return text.strip()
     except Exception as e:
         log.warning(f"OCR 失败: {e}")
         return ""
 
 
-def read_number(hwnd, roi, scale=3, psm=7):
-    """从 ROI 读取一个整数,返回 int 或 None"""
-    text = ocr_region(hwnd, roi, digit_only=True, scale=scale, psm=psm)
-    if not text:
-        return None
-    # 提取第一个数字
-    import re
-    m = re.search(r"\d+", text.replace(" ", ""))
-    if m:
-        try:
-            return int(m.group())
-        except ValueError:
-            return None
-    return None
-
-
 def read_remaining_trusteeship(hwnd, cfg):
     """
     读取剩余托管次数。
-    若配置了 remaining_count_roi 则用该区域;否则自动在全窗口搜索数字。
-    返回 remaining (int) 或 None。
+    用 OCR 在全窗口找 X/Y 格式的数字(如 15/20)。
     """
     ts = cfg.get("trusteeship_status", {})
-    roi = ts.get("remaining_count_roi", [])
     max_games = ts.get("max_games", 20)
     fmt = ts.get("display_format", "remaining/max")
+    roi = ts.get("remaining_count_roi", [])
 
     if roi:
-        # 用配置的区域
         text = ocr_region(hwnd, roi, digit_only=True, scale=3, psm=7)
     else:
-        # 自动检测:全窗口 OCR,找 X/Y 格式的数字
-        log.info("未配置托管次数 ROI,自动全窗口搜索...")
-        text = _auto_find_trustee_count(hwnd)
+        # 自动:在所有OCR文字块里找 X/Y 格式
+        log.info("自动搜索托管次数...")
+        blocks = _ocr_full(hwnd)
+        import re
+        for b in blocks:
+            m = re.search(r'(\d+)\s*/\s*(\d+)', b['text'])
+            if m:
+                text = b['text']
+                log.info(f"找到数字: {text} 于 ({b['x']},{b['y']})")
+                break
+        else:
+            text = ""
 
-    log.info(f"托管次数 OCR 原文: {text!r}")
+    log.info(f"托管次数 OCR: {text!r}")
 
     import re
-    # 匹配 X/Y 或单个 X
-    m = re.search(r"(\d+)\s*/\s*(\d+)", text.replace(" ", ""))
+    m = re.search(r'(\d+)\s*/\s*(\d+)', text.replace(' ', ''))
     if m:
         first = int(m.group(1))
         second = int(m.group(2))
-        if fmt == "current/max":
-            remaining = second - first
-        else:  # remaining/max
-            remaining = first
-        log.info(f"托管次数: 显示={first}/{second} 格式={fmt} 剩余={remaining}")
+        remaining = first if fmt == "remaining/max" else second - first
+        log.info(f"托管次数: {first}/{second} 剩余={remaining}")
         return remaining
 
-    # 单数字
-    m = re.search(r"\d+", text.replace(" ", ""))
+    m = re.search(r'\d+', text.replace(' ', ''))
     if m:
         val = int(m.group())
-        if fmt == "current/max":
-            remaining = max_games - val
-        else:
-            remaining = val
-        log.info(f"托管次数: 单值={val} 剩余={remaining}")
+        remaining = val if fmt == "remaining/max" else max_games - val
+        log.info(f"托管次数: {val} 剩余={remaining}")
         return remaining
 
-    log.warning(f"无法解析托管次数: {text!r}")
-    return None
-
-
-def _auto_find_trustee_count(hwnd):
-    """
-    自动在全窗口搜索托管次数(格式 X/Y,如 15/20)。
-    在顶部区域(ESC菜单信息通常在顶部)用 OCR 找。
-    """
-    if not _TESS or not _CV2:
-        return ""
-    result = grab_window(hwnd)
-    if not result or result[0] is None:
-        return ""
-    screen, _ = result
-    h, w = screen.shape[:2]
-    # 搜索顶部 1/3 区域(ESC菜单的托管信息在顶部)
-    top = screen[0:int(h*0.4), :]
-    gray = cv2.cvtColor(top, cv2.COLOR_BGR2GRAY)
-    # 放大
-    gray = cv2.resize(gray, (gray.shape[1]*2, gray.shape[0]*2),
-                      interpolation=cv2.INTER_CUBIC)
-    gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-    # 用 psm 11(稀疏文本)找所有文字
-    data = pytesseract.image_to_data(
-        gray, lang='eng',
-        config='--psm 11 -c tessedit_char_whitelist=0123456789/',
-        output_type=pytesseract.Output.DICT)
-    # 收集所有数字片段
-    fragments = []
-    for i in range(len(data['text'])):
-        t = data['text'][i].strip()
-        if t:
-            fragments.append(t)
-    full_text = ' '.join(fragments)
-    return full_text
+    log.warning("无法解析托管次数")
     return None
