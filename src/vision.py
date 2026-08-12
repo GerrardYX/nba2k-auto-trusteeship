@@ -36,6 +36,14 @@ except ImportError:
 
 try:
     import pytesseract
+    # Windows 上设置 tesseract 路径(常见安装位置)
+    import platform
+    if platform.system() == "Windows":
+        for p in [r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                  r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"]:
+            if os.path.exists(p):
+                pytesseract.pytesseract.tesseract_cmd = p
+                break
     _TESS = True
 except ImportError:
     _TESS = False
@@ -417,9 +425,16 @@ def find_text(hwnd, text, roi=None, timeout=10, interval=0.8, partial=True):
                             interpolation=cv2.INTER_CUBIC)
         gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
 
-        data = pytesseract.image_to_data(
-            gray, lang='chi_sim+eng', config='--psm 11',
-            output_type=pytesseract.Output.DICT)
+        try:
+            data = pytesseract.image_to_data(
+                gray, lang='chi_sim+eng', config='--psm 11',
+                output_type=pytesseract.Output.DICT)
+        except Exception as e:
+            log.error(f"OCR 调用失败(请确认 Tesseract 已安装): {e}")
+            if time.time() - start >= timeout:
+                return None
+            time.sleep(interval)
+            continue
 
         # 收集所有文字块,合并同行
         blocks = {}
