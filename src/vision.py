@@ -187,23 +187,37 @@ def _ocr_full(hwnd, roi=None):
     return results
 
 
+def _text_match(target, found, partial=True):
+    """
+    文字匹配逻辑。
+    partial=True: found 包含 target(如"开始比赛"包含"开始")
+    partial=False: 完全相等
+    不允许 target 包含 found(避免"动"匹配"启动"等假阳性)。
+    """
+    target = target.replace(' ', '')
+    found = found.replace(' ', '')
+    if partial:
+        # 只允许"找到的文字包含搜索词",不允许反向
+        # 但搜索词至少2个字才用包含匹配,1个字用精确匹配
+        if len(target) <= 1:
+            return found == target
+        return target in found
+    else:
+        return found == target
+
+
 def find_text(hwnd, text, roi=None, timeout=10, interval=0.8, partial=True):
     """
     OCR 查找文字,返回中心坐标或 None。
     partial: True=包含匹配(如"开始"匹配"开始比赛")
     """
     log.info(f"OCR 查找 [{text}] 超时={timeout}s")
-    target = text.replace(' ', '')
     start = time.time()
 
     while True:
         blocks = _ocr_full(hwnd, roi)
         for b in blocks:
-            if partial:
-                match = target in b['text'] or b['text'] in target
-            else:
-                match = (b['text'] == target)
-            if match:
+            if _text_match(text, b['text'], partial):
                 log.info(f"✓ 找到 [{text}] 于 ({b['x']},{b['y']}) 原文={b['text']}")
                 return b
         if time.time() - start >= timeout:
@@ -222,13 +236,8 @@ def find_any_text(hwnd, texts, roi=None, timeout=10, interval=0.8, partial=True)
         blocks = _ocr_full(hwnd, roi)
         for b in blocks:
             for t in texts:
-                target = t.replace(' ', '')
-                if partial:
-                    match = target in b['text'] or b['text'] in target
-                else:
-                    match = (b['text'] == target)
-                if match:
-                    log.info(f"✓ 找到 [{t}] 于 ({b['x']},{b['y']})")
+                if _text_match(t, b['text'], partial):
+                    log.info(f"✓ 找到 [{t}] 于 ({b['x']},{b['y']}) 原文={b['text']}")
                     return (t, b)
         if timeout == 0:
             return None
