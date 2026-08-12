@@ -86,7 +86,7 @@ def interactive_crop(img, title="框选区域"):
     """
     交互式框选区域。4K 图自动缩小到 1920 宽显示(否则超出屏幕看不到),
     框选后从【原图】按比例裁剪,保持高清模板。
-    操作:鼠标左键拖拽画矩形 → 按空格/回车确认 → 按 c 重选。
+    操作:鼠标左键拖拽画矩形 → 按空格/回车确认 → 按 c 取消。
     返回裁剪后的原图区域或 None。
     """
     h, w = img.shape[:2]
@@ -100,7 +100,7 @@ def interactive_crop(img, title="框选区域"):
         disp = cv2.resize(img, (disp_w, disp_h), interpolation=cv2.INTER_AREA)
         print(f"  (原图 {w}x{h} 已缩小到 {disp_w}x{disp_h} 显示,框选后自动还原高清)")
 
-    print("  操作:鼠标拖拽画框 → 空格/回车确认 → c 重选")
+    print("  操作:鼠标拖拽画框 → 空格/回车确认 → c 取消重截")
     roi = cv2.selectROI(title, disp, showCrosshair=True, fromCenter=False)
     cv2.destroyAllWindows()
     if roi[2] == 0 or roi[3] == 0:
@@ -113,6 +113,62 @@ def interactive_crop(img, title="框选区域"):
     rh = int(roi[3] / scale)
     # 从原图裁剪(高清)
     return img[y:y+rh, x:x+rw]
+
+
+def capture_and_crop(name, grab_func=None, timeout=5):
+    """
+    截图 + 框选 完整流程,带后悔机制:
+      - 倒计时后截屏,Alt+Tab 切窗口
+      - 框选区域(按 c 可取消)
+      - 取消后可选择:重新截屏 / 重新框选同一张图 / 跳过
+      - 框选后预览裁剪结果,不满意可重来
+    返回裁剪后的图像或 None(跳过)。
+    """
+    if grab_func is None:
+        grab_func = grab_full
+    img = None
+
+    while True:
+        # --- 截图阶段 ---
+        print(f"\n>>> 现在按 Alt+Tab 切到目标窗口!{timeout} 秒后截屏 <<<")
+        for c in range(timeout, 0, -1):
+            print(f"  {c}...")
+            time.sleep(1)
+        img = grab_func()
+        print(f"截图完成!({img.shape[1]}x{img.shape[0]})")
+
+        # --- 框选阶段 ---
+        while True:
+            print(f"\n请框选【{name}】区域")
+            cropped = interactive_crop(img, f"框选: {name}")
+            if cropped is None:
+                # 用户按 c 取消了框选
+                choice = input("未框选。r=重新截屏  f=用此图重新框选  s=跳过此步 [r/f/s]: ").strip().lower()
+                if choice == 'r':
+                    break  # 跳出框选循环,回到外层重新截图
+                elif choice == 'f':
+                    continue  # 用同一张图重新框选
+                else:
+                    return None  # 跳过
+            else:
+                # 框选成功,预览裁剪结果
+                print(f"  裁剪结果: {cropped.shape[1]}x{cropped.shape[0]}")
+                # 缩小预览(裁剪结果可能也很大)
+                ph, pw = cropped.shape[:2]
+                disp = cropped
+                if pw > 800:
+                    ds = 800 / pw
+                    disp = cv2.resize(cropped, (int(pw*ds), int(ph*ds)), interpolation=cv2.INTER_AREA)
+                cv2.imshow("预览: y=保存  n=重新截屏  任意键=重新框选", disp)
+                print("  预览窗口: 按 y 保存 / n 重新截屏 / 其他键 重新框选")
+                key = cv2.waitKey(0)
+                cv2.destroyAllWindows()
+                if key == ord('y') or key == ord('Y') or key == 13:
+                    return cropped  # 满意,保存
+                elif key == ord('n') or key == ord('N'):
+                    break  # 重新截屏
+                else:
+                    continue  # 重新框选同一张图
 
 
 def interactive_point(img, title="点击选择一个点(任意键确认)"):
@@ -149,18 +205,12 @@ def save_config(cfg):
 # 命令实现
 # ============================================================
 def cmd_capture(args):
-    """截图并裁剪模板"""
-    print("5 秒后截屏,请按 Alt+Tab 切到目标界面...")
-    for i in range(5, 0, -1):
-        print(f"  {i}...")
-        time.sleep(1)
-    img = grab_full()
-    print("请在弹出的窗口中框选要作为模板的区域")
-    cropped = interactive_crop(img, "框选模板区域")
+    """截图并裁剪模板(带后悔机制)"""
+    cropped = capture_and_crop(args.name)
     if cropped is not None:
         save_template(cropped, args.category, args.name)
     else:
-        print("取消")
+        print("已跳过")
 
 
 def cmd_test(args):
@@ -323,7 +373,8 @@ def cmd_autorun(args):
     print("  每一步会:1)提示你准备画面 2)5秒后截屏 3)你框选区域")
     print("  ⚠ 截屏会截到整个屏幕,倒计时时务必用 Alt+Tab 切到目标窗口!")
     print("    (终端窗口会被截进图里,所以要切到 WeGame/游戏 让目标可见)")
-    print("  框选窗口里:鼠标拖拽画框 → 空格/回车确认 → c 重选")
+    print("  框选:鼠标拖拽画框 → 空格/回车确认 → c 取消")
+    print("  后悔机制:切错窗口/框错都能重来(重新截屏/重新框选/跳过)")
     print("  4K 图会自动缩小显示,裁剪仍保持高清")
     print("  可随时按 Ctrl+C 跳过当前步骤(该模板留空,后续再补)")
     print("  已采集的步骤会跳过(除非加 --force)\n")
@@ -358,20 +409,14 @@ def cmd_autorun(args):
             continue
 
         try:
-            print("\n>>> 现在按 Alt+Tab 切换到目标窗口!5 秒后截屏 <<<")
-            for c in range(5, 0, -1):
-                print(f"  {c}...")
-                time.sleep(1)
-            img = grab_full()
-            print(f"截图完成!请在弹出的窗口里框选【{name}】区域")
-            print("  (鼠标拖拽画框 → 空格/回车确认)")
-            cropped = interactive_crop(img, f"框选: {name}")
+            # 用带后悔机制的截图+框选流程
+            cropped = capture_and_crop(name)
             if cropped is not None:
                 save_template(cropped, cat, fname)
-                # 立即测试
-                print("测试匹配...")
+                # 立即自测匹配
+                print("自测匹配...")
                 t = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
-                s = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                s = cv2.cvtColor(grab_full(), cv2.COLOR_BGR2GRAY)
                 res = cv2.matchTemplate(s, t, cv2.TM_CCOEFF_NORMED)
                 _, max_val, _, _ = cv2.minMaxLoc(res)
                 print(f"  自匹配置信度: {max_val:.4f} ({'✓良好' if max_val>0.9 else '⚠ 偏低,建议重选'})")
