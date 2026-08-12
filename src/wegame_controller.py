@@ -60,20 +60,20 @@ class WeGameController:
     # ----------------------------------------------------------
     def select_account_on_login(self, account_index):
         """
-        在登录界面选第 N 个账号。
-        1. OCR 找所有 QQ 号(纯数字,≥6位)
-        2. 如果找到多个→列表已展开→点第 N 个
-        3. 如果只找到1个→列表未展开→点这个号旁边的箭头展开→再找→点第N个
-        4. 需要滚动时(第5/6个)在列表区域滚→重新OCR→点
+        在登录界面选第 N 个账号并登录。
+        1. 找QQ号 → 如果只有1个,点右侧箭头展开列表
+        2. 列表展开后,点第N个账号
+        3. 点"登录"按钮
+        4. 等待进入主界面
         """
         if not self.activate():
             return False
         log.info(f"登录界面:选账号 #{account_index}")
 
-        # 尝试展开列表(如果没展开)
+        # 1. 展开账号列表(如果没展开)
         numbers = vision.find_all_numbers(self.hwnd, timeout=3)
         if len(numbers) <= 1:
-            log.info("账号列表可能未展开,尝试展开...")
+            log.info("账号列表未展开,点击下拉箭头...")
             self._try_expand_list()
             time.sleep(1.5)
             numbers = vision.find_all_numbers(self.hwnd, timeout=3)
@@ -83,7 +83,21 @@ class WeGameController:
             Logger.screenshot("no_accounts")
             return False
 
-        return self._select_from_numbers(numbers, account_index)
+        # 2. 选择账号
+        if not self._select_from_numbers(numbers, account_index):
+            return False
+
+        # 3. 点击"登录"按钮(选完账号后需要点登录)
+        time.sleep(1)
+        log.info("点击登录按钮")
+        if vision.click_text(self.hwnd, "登录", timeout=5, partial=False):
+            log.info("已点击登录")
+        else:
+            # 备用:partial 匹配
+            vision.click_text(self.hwnd, "登录", timeout=3, partial=True)
+
+        # 4. 等待进入主界面
+        return self.wait_account_logged_in(timeout=40)
 
     def _try_expand_list(self):
         """
@@ -109,17 +123,16 @@ class WeGameController:
         vision.click(arrow_x, arrow_y, hwnd=self.hwnd)
 
     def _select_from_numbers(self, numbers, account_index):
-        """从OCR找到的数字列表中选第N个,需要时滚动"""
+        """从OCR找到的数字列表中选第N个,需要时滚动。返回 True/False"""
         visible_count = len(numbers)
         scroll_steps = self.cfg.get("account_list", {}).get("scroll_steps_for_tail", 3)
 
         if account_index <= visible_count:
-            # 直接点第 N 个
             n = numbers[account_index - 1]
             log.info(f"点击账号 #{account_index}: {n['text']} ({n['x']},{n['y']})")
             vision.click(n['x'], n['y'], hwnd=self.hwnd)
-            time.sleep(2)
-            return self.wait_account_logged_in(timeout=40)
+            time.sleep(1)
+            return True
 
         # 需要滚动
         log.info(f"账号 #{account_index} 在列表下方,滚动...")
@@ -140,8 +153,8 @@ class WeGameController:
             n = numbers[account_index - 1]
             log.info(f"滚动后点击账号 #{account_index}: {n['text']}")
             vision.click(n['x'], n['y'], hwnd=self.hwnd)
-            time.sleep(2)
-            return self.wait_account_logged_in(timeout=40)
+            time.sleep(1)
+            return True
 
         log.error("滚动后仍未找到目标账号")
         return False
