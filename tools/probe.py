@@ -298,42 +298,16 @@ def grab_fullscreen():
 def main():
     parser = argparse.ArgumentParser(description="视觉探针工具")
     parser.add_argument('--diff', action='store_true', help='变化检测:操作前后对比')
-    parser.add_argument('--fullscreen', action='store_true', help='直接截全屏(不找窗口)')
     args = parser.parse_args()
 
-    # 默认先找 WeGame 窗口,找不到就截全屏
-    use_fullscreen = args.fullscreen
-    hwnd = None
-
-    if not use_fullscreen:
-        try:
-            import window_utils
-            # 尝试多个关键词
-            for kws in [["WeGame"], ["WeGame", "wegame"], ["腾讯"], ["Tencent"]]:
-                hwnd = window_utils.find_window(kws)
-                if hwnd:
-                    print(f"✓ 找到窗口 (关键词={kws[0]}) hwnd={hwnd}")
-                    window_utils.activate_window(hwnd)
-                    time.sleep(1)
-                    break
-        except Exception as e:
-            print(f"⚠ 窗口查找异常: {e}")
-
-    if not hwnd:
-        print("⚠ 未找到 WeGame 窗口,改为截全屏")
-        print("  (确保 WeGame 在屏幕上可见!)")
-        use_fullscreen = True
+    # 始终用全屏模式(简单可靠,不用找窗口)
+    print("确保 WeGame 在屏幕上可见!")
+    time.sleep(1)
 
     if args.diff:
-        if use_fullscreen:
-            diff_mode_fullscreen()
-        else:
-            diff_mode(hwnd)
+        diff_mode_fullscreen()
     else:
-        if use_fullscreen:
-            probe_once_fullscreen(tag="manual")
-        else:
-            probe_once(hwnd, tag="manual")
+        probe_once_fullscreen(tag="manual")
 
 
 def probe_once_fullscreen(tag="probe"):
